@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# runtime
+.file_server.log
+.file_server.pid
+.file_server.port
+.file_server.runtime_port
+
+# shared payload, not source
+down/*
+!down/.gitkeep
