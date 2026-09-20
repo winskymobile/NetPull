@@ -2,7 +2,7 @@
     [Parameter(Position = 0)]
     [string]$Command = "",
     [Parameter(Position = 1)]
-    [string]$PortValue = ""
+    [string]$ArgValue = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,13 +14,17 @@ $PidFile = Join-Path $Root ".file_server.pid"
 $LogFile = Join-Path $Root ".file_server.log"
 $ErrLog = Join-Path $Root ".file_server.err.log"
 $Server = Join-Path $Root "file_server.py"
-$ShareDir = if ($env:SHARE_DIR) { $env:SHARE_DIR } else { Join-Path $Root "down" }
 $Bind = if ($env:BIND) { $env:BIND } else { "0.0.0.0" }
 $script:DefaultPort = 8765
 $script:PortFile = Join-Path $Root ".file_server.port"
 $script:RuntimePortFile = Join-Path $Root ".file_server.runtime_port"
 $script:PortFromEnv = $env:PORT
 $script:Port = $script:DefaultPort
+$script:DefaultShareDir = Join-Path $Root "down"
+$script:ShareFile = Join-Path $Root ".file_server.share_dir"
+$script:RuntimeShareFile = Join-Path $Root ".file_server.runtime_share"
+$script:ShareFromEnv = $env:SHARE_DIR
+$script:ShareDir = $script:DefaultShareDir
 $script:ShowDetails = $true
 
 function Enable-VirtualTerminal {
@@ -122,6 +126,93 @@ function Get-ActivePort {
         if ($live) { return $live }
     }
     return $script:Port
+}
+
+function Resolve-ShareDir([string]$Value) {
+    $raw = ($Value + "").Trim()
+    if (-not $raw) { return $null }
+    if ($raw -eq "~") {
+        $raw = $env:USERPROFILE
+    } elseif ($raw.StartsWith("~\") -or $raw.StartsWith("~/")) {
+        $raw = Join-Path $env:USERPROFILE $raw.Substring(2)
+    }
+    if (-not [System.IO.Path]::IsPathRooted($raw)) {
+        $raw = Join-Path $Root $raw
+    }
+    try {
+        return [System.IO.Path]::GetFullPath($raw)
+    } catch {
+        return $null
+    }
+}
+
+function Test-ValidShareDir([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    if ((Test-Path -LiteralPath $Value) -and -not (Test-Path -LiteralPath $Value -PathType Container)) {
+        return $false
+    }
+    return $true
+}
+
+function Test-SameShareDir([string]$Left, [string]$Right) {
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) { return $false }
+    return ($Left.TrimEnd("\", "/").ToLowerInvariant() -eq $Right.TrimEnd("\", "/").ToLowerInvariant())
+}
+
+function Read-SavedShare {
+    if (-not (Test-Path -LiteralPath $script:ShareFile)) { return $null }
+    $raw = ((Get-Content -LiteralPath $script:ShareFile -Raw -ErrorAction SilentlyContinue) + "").Trim()
+    $resolved = Resolve-ShareDir $raw
+    if ($resolved -and (Test-ValidShareDir $resolved)) { return $resolved }
+    return $null
+}
+
+function Read-RuntimeShare {
+    if (-not (Test-Path -LiteralPath $script:RuntimeShareFile)) { return $null }
+    $raw = ((Get-Content -LiteralPath $script:RuntimeShareFile -Raw -ErrorAction SilentlyContinue) + "").Trim()
+    if ($raw) { return $raw }
+    return $null
+}
+
+function Get-ShareLabel {
+    if ($script:ShareFromEnv) { return "本次环境变量" }
+    if (Test-Path -LiteralPath $script:ShareFile) { return "已保存" }
+    return "默认"
+}
+
+function Initialize-Share {
+    $saved = Read-SavedShare
+    if ($script:ShareFromEnv) {
+        $resolved = Resolve-ShareDir $script:ShareFromEnv
+        if ($resolved -and (Test-ValidShareDir $resolved)) {
+            $script:ShareDir = $resolved
+        } else {
+            Write-ErrMsg "环境变量 SHARE_DIR 无效: $($script:ShareFromEnv)，改用已保存或默认目录"
+            $script:ShareDir = if ($saved) { $saved } else { $script:DefaultShareDir }
+        }
+    } elseif ($saved) {
+        $script:ShareDir = $saved
+    } else {
+        $script:ShareDir = $script:DefaultShareDir
+    }
+}
+
+function Save-Share([string]$Value) {
+    $script:ShareDir = $Value
+    if (Test-SameShareDir $Value $script:DefaultShareDir) {
+        Remove-Item -LiteralPath $script:ShareFile -Force -ErrorAction SilentlyContinue
+        $script:ShareDir = $script:DefaultShareDir
+    } else {
+        Set-Content -LiteralPath $script:ShareFile -Value "$Value" -Encoding UTF8
+    }
+}
+
+function Get-ActiveShare {
+    if (Get-RunningPid) {
+        $live = Read-RuntimeShare
+        if ($live) { return $live }
+    }
+    return $script:ShareDir
 }
 
 function Test-Alive([int]$ProcessId) {
@@ -254,17 +345,19 @@ function Resolve-Python {
 }
 
 function Show-Usage {
-    Write-Host "用法: server.bat [start|stop|restart|status|port]"
+    Write-Host "用法: server.bat [start|stop|restart|status|dir|port]"
     Write-Host ""
     Write-Host "  start           启动服务"
     Write-Host "  stop            停止服务"
     Write-Host "  restart         重启服务"
     Write-Host "  status          查看状态"
+    Write-Host "  dir [路径]      修改分享目录；dir default 恢复 down"
     Write-Host "  port [端口]     修改端口；port default 恢复 8765"
     Write-Host ""
     Write-Host "不带参数时进入菜单；执行完一项后会回到菜单，选 0 才退出。"
     Write-Host "服务运行中退出时会询问是否同时停止。"
-    Write-Host "端口会保存到 .file_server.port，菜单第 5 项也可改。"
+    Write-Host "分享目录保存到 .file_server.share_dir，菜单第 5 项也可改。"
+    Write-Host "端口会保存到 .file_server.port，菜单第 6 项也可改。"
 }
 
 function Invoke-Status {
@@ -272,7 +365,7 @@ function Invoke-Status {
     if ($pidNow) {
         Write-Host "状态: 运行中 (PID $pidNow)" -ForegroundColor Green
         if ($script:ShowDetails) {
-            Write-Host "目录: $ShareDir"
+            Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
             Write-Host ("端口: {0} ({1})" -f $script:Port, (Get-PortLabel))
             Write-Urls -ShowPort (Get-ActivePort)
             Write-Host "日志: $LogFile"
@@ -280,7 +373,7 @@ function Invoke-Status {
     } else {
         Write-Warn "状态: 未运行"
         if ($script:ShowDetails) {
-            Write-Host "目录: $ShareDir"
+            Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
             Write-Host ("端口: {0} ({1})" -f $script:Port, (Get-PortLabel))
         }
     }
@@ -292,7 +385,7 @@ function Invoke-Start {
         return
     }
 
-    New-Item -ItemType Directory -Force -Path $ShareDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $script:ShareDir | Out-Null
 
     $py = Resolve-Python
     if (-not $py) {
@@ -304,7 +397,7 @@ function Invoke-Start {
     if ($pidNow) {
         Write-Warn "服务已在运行 (PID $pidNow)"
         if ($script:ShowDetails) {
-            Write-Host "目录: $ShareDir"
+            Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
             Write-Urls
             Write-Host "日志: $LogFile"
         }
@@ -329,7 +422,7 @@ function Invoke-Start {
         $Server,
         "--bind", $Bind,
         "--port", "$script:Port",
-        "--directory", $ShareDir
+        "--directory", $script:ShareDir
     )
 
     try {
@@ -358,14 +451,16 @@ function Invoke-Start {
         if (Test-Path -LiteralPath $ErrLog) { Get-Content -LiteralPath $ErrLog -Tail 40 }
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:RuntimePortFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:RuntimeShareFile -Force -ErrorAction SilentlyContinue
         try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
         return
     }
 
     Set-Content -LiteralPath $script:RuntimePortFile -Value "$($script:Port)" -Encoding ASCII
+    Set-Content -LiteralPath $script:RuntimeShareFile -Value "$($script:ShareDir)" -Encoding UTF8
     Write-Ok "已启动内网文件服务 (PID $($proc.Id))"
     if ($script:ShowDetails) {
-        Write-Host "目录: $ShareDir"
+        Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
         Write-Urls
         Write-Host "日志: $LogFile"
         Write-Host "停止: server.bat stop"
@@ -377,6 +472,7 @@ function Invoke-Stop {
     if ($pids.Count -eq 0) {
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:RuntimePortFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:RuntimeShareFile -Force -ErrorAction SilentlyContinue
         Write-Warn "服务未运行"
         return
     }
@@ -400,6 +496,7 @@ function Invoke-Stop {
 
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $script:RuntimePortFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:RuntimeShareFile -Force -ErrorAction SilentlyContinue
     Write-Warn "已停止内网文件服务"
     if ($script:ShowDetails -and (Test-Path -LiteralPath $LogFile)) {
         Write-Host "日志: $LogFile"
@@ -497,6 +594,82 @@ function Invoke-SetPort {
     }
 }
 
+function Apply-ShareValue([string]$InputValue) {
+    $input = ($InputValue + "").Trim()
+    if (-not $input) {
+        Write-Dim "已取消"
+        return
+    }
+    $newDir = $null
+    switch -Regex ($input) {
+        '^(?i)(default|d|默认|reset|restore)$' { $newDir = $script:DefaultShareDir }
+        default {
+            $newDir = Resolve-ShareDir $input
+            if (-not $newDir) {
+                Write-ErrMsg "路径无效: $input"
+                return
+            }
+            if ((Test-Path -LiteralPath $newDir) -and -not (Test-Path -LiteralPath $newDir -PathType Container)) {
+                Write-ErrMsg "不是目录: $newDir"
+                return
+            }
+        }
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $newDir | Out-Null
+        $newDir = Resolve-ShareDir $newDir
+    } catch {
+        Write-ErrMsg "无法创建目录: $newDir"
+        return
+    }
+    if (Test-SameShareDir $newDir $script:ShareDir) {
+        if ((Test-SameShareDir $newDir $script:DefaultShareDir) -and (Test-Path -LiteralPath $script:ShareFile)) {
+            Save-Share $newDir
+            Write-Ok "已恢复默认目录 $($script:DefaultShareDir)"
+        } else {
+            Write-Warn "已经是目录 $newDir"
+            return
+        }
+    } else {
+        Save-Share $newDir
+        if (Test-SameShareDir $newDir $script:DefaultShareDir) {
+            Write-Ok "已恢复默认目录 $($script:DefaultShareDir)"
+        } else {
+            Write-Ok "分享目录已保存为 $($script:ShareDir)"
+        }
+    }
+    if (Get-RunningPid) {
+        $live = Read-RuntimeShare
+        if ((-not $live) -or -not (Test-SameShareDir $live $script:ShareDir)) {
+            if ([Environment]::UserInteractive) {
+                Write-Warn "服务仍在使用 $live，是否立即按新目录重启？ [Y/n] " -NoNewline
+                $answer = Read-Host
+                if ($answer -match '^(n|no|否)$') {
+                    Write-Hi "下次启动或重启后生效。"
+                } else {
+                    Invoke-Restart
+                }
+            } else {
+                Write-Hi "服务仍在使用 $live，下次启动或重启后生效。"
+            }
+        }
+    }
+}
+
+function Invoke-SetShare {
+    Write-Host ("当前目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
+    if (Get-RunningPid) {
+        Write-Host ("服务正在使用 {0}" -f (Get-ActiveShare))
+    }
+    Write-Host "输入新路径。相对路径相对于本程序目录。输入 default / 默认 恢复 down，回车取消。"
+    if ([Environment]::UserInteractive) {
+        $input = Read-Host ">"
+        Apply-ShareValue $input
+    } else {
+        Write-ErrMsg "非交互环境请使用: server.bat dir D:\share  或  server.bat dir default"
+    }
+}
+
 function Show-Menu {
     $script:ShowDetails = $false
     $redraw = $true
@@ -512,12 +685,18 @@ function Show-Menu {
             } else {
                 Write-Warn $statusLine
             }
-            Write-Host "目录: $ShareDir"
+            Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
             Write-Host ("端口: {0} ({1})" -f $script:Port, (Get-PortLabel))
             if ($pidNow) {
                 $live = Read-RuntimePort
+                $liveDir = Read-RuntimeShare
                 if ($live -and $live -ne $script:Port) {
-                    Write-Warn "服务仍在 $live，重启后才会改到 $($script:Port)"
+                    Write-Warn "服务仍在端口 $live，重启后才会改到 $($script:Port)"
+                }
+                if ($liveDir -and -not (Test-SameShareDir $liveDir $script:ShareDir)) {
+                    Write-Warn "服务仍在目录 $liveDir，重启后才会改到 $($script:ShareDir)"
+                }
+                if ($live -and $live -ne $script:Port) {
                     Write-Urls -ShowPort $live
                 } else {
                     Write-Urls -ShowPort $script:Port
@@ -528,18 +707,20 @@ function Show-Menu {
             Write-Host "  2) 停止"
             Write-Host "  3) 重启"
             Write-Host "  4) 状态"
-            Write-Host "  5) 修改端口"
+            Write-Host "  5) 修改分享目录"
+            Write-Host "  6) 修改端口"
             Write-Host "  0) 退出"
             Write-Host ""
         }
         $redraw = $true
-        $choice = Read-Host "请选择 [0-5]"
+        $choice = Read-Host "请选择 [0-6]"
         switch ($choice) {
             { $_ -in @("1", "start", "启动") } { Invoke-Start }
             { $_ -in @("2", "stop", "停止") } { Invoke-Stop }
             { $_ -in @("3", "restart", "重启") } { Invoke-Restart }
             { $_ -in @("4", "status", "状态") } { }
-            { $_ -in @("5", "port", "端口") } { Invoke-SetPort }
+            { $_ -in @("5", "dir", "share", "目录") } { Invoke-SetShare }
+            { $_ -in @("6", "port", "端口") } { Invoke-SetPort }
             { $_ -in @("0", "q", "quit", "exit", "退出") } {
                 Confirm-Exit
                 return
@@ -565,15 +746,25 @@ function Invoke-ThenMenu([scriptblock]$Action) {
 }
 
 Initialize-Port
+Initialize-Share
 
 switch ($Command.ToLowerInvariant()) {
     { $_ -in @("start", "on", "up", "启动") } { Invoke-ThenMenu { Invoke-Start } }
     { $_ -in @("stop", "off", "停止") } { Invoke-ThenMenu { Invoke-Stop } }
     { $_ -in @("restart", "reboot", "重启") } { Invoke-ThenMenu { Invoke-Restart } }
     { $_ -in @("status", "state", "状态") } { Invoke-ThenMenu { Invoke-Status } }
+    { $_ -in @("dir", "share", "directory", "目录") } {
+        if ($ArgValue) {
+            Apply-ShareValue $ArgValue
+            if ([Environment]::UserInteractive) { Show-Menu }
+        } else {
+            Invoke-SetShare
+            if ([Environment]::UserInteractive) { Show-Menu }
+        }
+    }
     { $_ -in @("port", "端口") } {
-        if ($PortValue) {
-            Apply-PortValue $PortValue
+        if ($ArgValue) {
+            Apply-PortValue $ArgValue
             if ([Environment]::UserInteractive) { Show-Menu }
         } else {
             Invoke-SetPort

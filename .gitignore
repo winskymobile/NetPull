@@ -11,6 +11,8 @@ __pycache__/
 .file_server.pid
 .file_server.port
 .file_server.runtime_port
+.file_server.share_dir
+.file_server.runtime_share
 
 # shared payload, not source
 down/*

@@ -8,17 +8,25 @@ PID_FILE="$ROOT/.file_server.pid"
 LOG_FILE="$ROOT/.file_server.log"
 PORT_FILE="$ROOT/.file_server.port"
 RUNTIME_PORT_FILE="$ROOT/.file_server.runtime_port"
+SHARE_FILE="$ROOT/.file_server.share_dir"
+RUNTIME_SHARE_FILE="$ROOT/.file_server.runtime_share"
 BIND="${BIND:-0.0.0.0}"
 DEFAULT_PORT=8765
+DEFAULT_SHARE_DIR="$ROOT/down"
 if [[ -n "${PORT:-}" ]]; then
   PORT_FROM_ENV="$PORT"
 else
   PORT_FROM_ENV=""
 fi
+if [[ -n "${SHARE_DIR:-}" ]]; then
+  SHARE_DIR_FROM_ENV="$SHARE_DIR"
+else
+  SHARE_DIR_FROM_ENV=""
+fi
 PORT="$DEFAULT_PORT"
+SHARE_DIR="$DEFAULT_SHARE_DIR"
 PY="${PYTHON:-python3}"
 SERVER="$ROOT/file_server.py"
-SHARE_DIR="${SHARE_DIR:-$ROOT/down}"
 VERBOSE="${VERBOSE:-1}"
 
 is_verbose() {
@@ -100,6 +108,113 @@ active_port() {
   echo "${live:-$PORT}"
 }
 
+trim_text() {
+  local s="${1:-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+resolve_share_dir() {
+  local raw
+  raw="$(trim_text "${1:-}")"
+  [[ -n "$raw" ]] || return 1
+  case "$raw" in
+    "~") raw="$HOME" ;;
+    "~/"*) raw="$HOME/${raw:2}" ;;
+  esac
+  if [[ "$raw" != /* ]]; then
+    raw="$ROOT/$raw"
+  fi
+  local parent base
+  parent="$(dirname -- "$raw")"
+  base="$(basename -- "$raw")"
+  if [[ -d "$parent" ]]; then
+    parent="$(cd "$parent" && pwd)"
+    printf '%s\n' "$parent/$base"
+  else
+    printf '%s\n' "$raw"
+  fi
+}
+
+valid_share_dir() {
+  local d="${1:-}"
+  [[ -n "$d" ]] || return 1
+  if [[ -e "$d" && ! -d "$d" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+read_saved_share() {
+  local p=""
+  if [[ -f "$SHARE_FILE" ]]; then
+    p="$(trim_text "$(tr -d '\r' < "$SHARE_FILE" || true)")"
+  fi
+  if [[ -n "$p" ]] && p="$(resolve_share_dir "$p")" && valid_share_dir "$p"; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  return 1
+}
+
+read_runtime_share() {
+  local p=""
+  if [[ -f "$RUNTIME_SHARE_FILE" ]]; then
+    p="$(trim_text "$(tr -d '\r' < "$RUNTIME_SHARE_FILE" || true)")"
+  fi
+  if [[ -n "$p" ]]; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  return 1
+}
+
+share_source_label() {
+  if [[ -n "$SHARE_DIR_FROM_ENV" ]]; then
+    echo "本次环境变量"
+  elif [[ -f "$SHARE_FILE" ]]; then
+    echo "已保存"
+  else
+    echo "默认"
+  fi
+}
+
+load_share() {
+  local saved="" resolved=""
+  saved="$(read_saved_share || true)"
+  if [[ -n "$SHARE_DIR_FROM_ENV" ]]; then
+    if resolved="$(resolve_share_dir "$SHARE_DIR_FROM_ENV")" && valid_share_dir "$resolved"; then
+      SHARE_DIR="$resolved"
+    else
+      say red "环境变量 SHARE_DIR 无效: $SHARE_DIR_FROM_ENV，改用已保存或默认目录"
+      SHARE_DIR="${saved:-$DEFAULT_SHARE_DIR}"
+    fi
+  elif [[ -n "$saved" ]]; then
+    SHARE_DIR="$saved"
+  else
+    SHARE_DIR="$DEFAULT_SHARE_DIR"
+  fi
+}
+
+save_share() {
+  local d="$1"
+  SHARE_DIR="$d"
+  if [[ "$d" == "$DEFAULT_SHARE_DIR" ]]; then
+    rm -f "$SHARE_FILE"
+  else
+    printf '%s\n' "$d" > "$SHARE_FILE"
+  fi
+}
+
+active_share() {
+  local live=""
+  if running_pid >/dev/null 2>&1; then
+    live="$(read_runtime_share || true)"
+  fi
+  echo "${live:-$SHARE_DIR}"
+}
+
 if [[ -z "${NO_COLOR:-}" && -t 1 && "${TERM:-}" != "dumb" ]]; then
   ENABLE_COLOR=1
 else
@@ -137,24 +252,29 @@ say() {
 
 usage() {
   cat <<EOF
-用法: $(basename "$0") [start|stop|restart|status|port]
+用法: $(basename "$0") [start|stop|restart|status|dir|port]
 
   start           启动服务
   stop            停止服务
   restart         重启服务
   status          查看状态
+  dir [路径]      修改分享目录；dir default 恢复 down
   port [端口]     修改端口；port default 恢复 8765
 
 不带参数时进入菜单；执行完一项后会回到菜单，选 0 才退出。
 服务运行中退出时会询问是否同时停止。
-端口会保存到 .file_server.port，菜单第 5 项也可改。
+分享目录保存到 .file_server.share_dir，菜单第 5 项也可改。
+端口会保存到 .file_server.port，菜单第 6 项也可改。
 
 示例:
   ./server.sh start
   ./server.sh stop
+  ./server.sh dir ~/Downloads
+  ./server.sh dir default
   ./server.sh port 9000
   ./server.sh port default
   PORT=9000 ./server.sh start
+  SHARE_DIR=/other/path ./server.sh start
 EOF
 }
 
@@ -262,7 +382,7 @@ cmd_status() {
   if pid="$(running_pid)"; then
     printf '状态: %s\n' "$(paint green "运行中 (PID ${pid})")"
     if is_verbose; then
-      echo "目录: $SHARE_DIR"
+      echo "目录: $SHARE_DIR ($(share_source_label))"
       echo "端口: $PORT ($(port_source_label))"
       print_urls "$(active_port)"
       echo "日志: $LOG_FILE"
@@ -271,7 +391,7 @@ cmd_status() {
   fi
   printf '状态: %s\n' "$(paint yellow "未运行")"
   if is_verbose; then
-    echo "目录: $SHARE_DIR"
+    echo "目录: $SHARE_DIR ($(share_source_label))"
     echo "端口: $PORT ($(port_source_label))"
   fi
   return 0
@@ -294,7 +414,7 @@ cmd_start() {
   if pid="$(running_pid)"; then
     say yellow "服务已在运行 (PID ${pid})"
     if is_verbose; then
-      echo "目录: $SHARE_DIR"
+      echo "目录: $SHARE_DIR ($(share_source_label))"
       print_urls
       echo "日志: $LOG_FILE"
     fi
@@ -333,14 +453,15 @@ cmd_start() {
   if [[ "$ok" -ne 1 ]]; then
     say red "启动失败，最近日志:"
     tail -n 40 "$LOG_FILE" || true
-    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE"
+    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE"
     return 1
   fi
 
   printf '%s\n' "$PORT" > "$RUNTIME_PORT_FILE"
+  printf '%s\n' "$SHARE_DIR" > "$RUNTIME_SHARE_FILE"
   say green "已启动内网文件服务 (PID ${pid})"
   if is_verbose; then
-    echo "目录: $SHARE_DIR"
+    echo "目录: $SHARE_DIR ($(share_source_label))"
     print_urls
     echo "日志: $LOG_FILE"
     echo "停止: ./server.sh stop"
@@ -351,7 +472,7 @@ cmd_stop() {
   local pids pid
   pids="$(collect_pids || true)"
   if [[ -z "$pids" ]]; then
-    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE"
+    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE"
     say yellow "服务未运行"
     return 0
   fi
@@ -376,7 +497,7 @@ cmd_stop() {
     return 1
   fi
 
-  rm -f "$PID_FILE" "$RUNTIME_PORT_FILE"
+  rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE"
   say yellow "已停止内网文件服务"
   if is_verbose && [[ -f "$LOG_FILE" ]]; then
     echo "日志: $LOG_FILE"
@@ -480,6 +601,85 @@ cmd_set_port() {
   apply_port_value "$input"
 }
 
+apply_share_value() {
+  local raw new live answer
+  raw="$(trim_text "${1:-}")"
+  if [[ -z "$raw" ]]; then
+    say dim "已取消"
+    return 0
+  fi
+  case "$raw" in
+    default|DEFAULT|默认|reset|restore|d)
+      new="$DEFAULT_SHARE_DIR"
+      ;;
+    *)
+      if ! new="$(resolve_share_dir "$raw")"; then
+        say red "路径无效: ${raw}"
+        return 1
+      fi
+      if [[ -e "$new" && ! -d "$new" ]]; then
+        say red "不是目录: ${new}"
+        return 1
+      fi
+      ;;
+  esac
+
+  if ! mkdir -p "$new" 2>/dev/null; then
+    say red "无法创建目录: $new"
+    return 1
+  fi
+  new="$(resolve_share_dir "$new")"
+
+  if [[ "$new" == "$SHARE_DIR" ]]; then
+    if [[ "$new" == "$DEFAULT_SHARE_DIR" && -f "$SHARE_FILE" ]]; then
+      save_share "$new"
+      say green "已恢复默认目录 $DEFAULT_SHARE_DIR"
+    else
+      say yellow "已经是目录 $new"
+      return 0
+    fi
+  else
+    save_share "$new"
+    if [[ "$new" == "$DEFAULT_SHARE_DIR" ]]; then
+      say green "已恢复默认目录 $DEFAULT_SHARE_DIR"
+    else
+      say green "分享目录已保存为 $SHARE_DIR"
+    fi
+  fi
+
+  if running_pid >/dev/null 2>&1; then
+    live="$(read_runtime_share || true)"
+    if [[ -z "$live" || "$live" != "$SHARE_DIR" ]]; then
+      if [[ -t 0 ]]; then
+        printf '%s' "$(paint yellow "服务仍在使用 $live，是否立即按新目录重启？ [Y/n] ")"
+        read -r answer
+        case "${answer:-Y}" in
+          n|N|no|NO|否) say cyan "下次启动或重启后生效。" ;;
+          *) cmd_restart || true ;;
+        esac
+      else
+        say cyan "服务仍在使用 $live，下次启动或重启后生效。"
+      fi
+    fi
+  fi
+}
+
+cmd_set_share() {
+  local input
+  echo "当前目录: $SHARE_DIR ($(share_source_label))"
+  if running_pid >/dev/null 2>&1; then
+    echo "服务正在使用 $(active_share)"
+  fi
+  echo "输入新路径。相对路径相对于本程序目录。输入 default / 默认 恢复 down，回车取消。"
+  if [[ -t 0 ]]; then
+    read -r -p "> " input
+  else
+    say red "非交互环境请使用: ./server.sh dir /path  或  ./server.sh dir default"
+    return 1
+  fi
+  apply_share_value "$input"
+}
+
 print_menu() {
   local pid
   echo
@@ -489,14 +689,19 @@ print_menu() {
   else
     printf '状态: %s\n' "$(paint yellow "未运行")"
   fi
-  echo "目录: $SHARE_DIR"
-  printf '端口: %s (%s)
-' "$PORT" "$(port_source_label)"
+  echo "目录: $SHARE_DIR ($(share_source_label))"
+  printf '端口: %s (%s)\n' "$PORT" "$(port_source_label)"
   if [[ -n "${pid:-}" ]]; then
-    local live
+    local live live_dir
     live="$(read_runtime_port || true)"
+    live_dir="$(read_runtime_share || true)"
     if [[ -n "$live" && "$live" != "$PORT" ]]; then
-      say yellow "服务仍在 $live，重启后才会改到 $PORT"
+      say yellow "服务仍在端口 $live，重启后才会改到 $PORT"
+    fi
+    if [[ -n "$live_dir" && "$live_dir" != "$SHARE_DIR" ]]; then
+      say yellow "服务仍在目录 $live_dir，重启后才会改到 $SHARE_DIR"
+    fi
+    if [[ -n "$live" && "$live" != "$PORT" ]]; then
       print_urls "$live"
     else
       print_urls "$PORT"
@@ -508,7 +713,8 @@ print_menu() {
   2) 停止
   3) 重启
   4) 状态
-  5) 修改端口
+  5) 修改分享目录
+  6) 修改端口
   0) 退出
 
 EOF
@@ -523,7 +729,7 @@ menu() {
       print_menu
     fi
     redraw=1
-    read -r -p "请选择 [0-5]: " choice
+    read -r -p "请选择 [0-6]: " choice
     case "${choice:-}" in
       1|start|on|up|启动)
         cmd_start || true
@@ -536,7 +742,10 @@ menu() {
         ;;
       4|status|state|状态)
         ;;
-      5|port|端口)
+      5|dir|share|directory|目录)
+        cmd_set_share || true
+        ;;
+      6|port|端口)
         cmd_set_port || true
         ;;
       0|q|quit|exit|退出)
@@ -570,6 +779,7 @@ run_and_maybe_menu() {
 }
 
 load_port
+load_share
 
 action="${1:-}"
 case "$action" in
@@ -577,6 +787,19 @@ case "$action" in
   stop|off|停止) run_and_maybe_menu cmd_stop ;;
   restart|reboot|重启) run_and_maybe_menu cmd_restart ;;
   status|state|状态) run_and_maybe_menu cmd_status ;;
+  dir|share|directory|目录)
+    if [[ -n "${2:-}" ]]; then
+      apply_share_value "$2"
+      if [[ -t 0 ]]; then
+        menu
+      fi
+    else
+      cmd_set_share || true
+      if [[ -t 0 ]]; then
+        menu
+      fi
+    fi
+    ;;
   port|端口)
     if [[ -n "${2:-}" ]]; then
       apply_port_value "$2"

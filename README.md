@@ -1,19 +1,273 @@
-# NetPull
+# NetPull 内网下载
 
-局域网文件分享。把文件放进 `down/`，启动服务后，同一网段的同事用浏览器下载。
+把 `down` 目录里的文件，通过浏览器分享给同一局域网的同事。无需登录，默认端口 `8765`。
 
-无需登录，默认端口 `8765`。只有浏览和下载，没有上传。裸 HTTP，不要映射到公网。
+> 这是裸 HTTP 静态分享：没有账号、没有加密。只适合内网，不要映射到公网。
+
+## 它能做什么
+
+- 本机放文件，同事用浏览器浏览、搜索、下载
+- 只有下载，没有上传、删除、改名
+- macOS / Linux / Windows 用同一套命令：启动、停止、重启、看状态、改端口
+- 网页按类型显示图标，跟随系统亮色 / 暗色
+
+## 使用前准备
+
+- 已安装 Python 3（Windows 安装时勾选 **Add python.exe to PATH**）
+- 电脑和对方在同一局域网
+- 要分享的文件放在 `down/`，不要放在脚本所在的根目录
 
 ## 快速开始
 
-macOS / Linux：
+macOS / Linux 和 Windows 都只用一个脚本：启动、停止、重启、看状态都在里面。
+
+### macOS / Linux
 
 ```bash
+cd /path/to/NetPull
 ./server.sh start
 ```
 
-Windows：双击 `server.bat`，菜单里选启动。
+启动成功后会打印本机和局域网地址，例如：
 
-把打印出来的 `http://192.168.x.x:8765/` 发给同事即可。
+```text
+已启动内网文件服务 (PID 12345)
+目录: /path/to/NetPull/down
+访问地址:
+  http://127.0.0.1:8765/
+  http://192.168.x.x:8765/
+```
 
-完整说明见 [使用说明.md](./使用说明.md)。
+本机用第一条，同事用带局域网 IP 的那条。
+
+```bash
+./server.sh stop          # 停止
+./server.sh restart       # 重启
+./server.sh status        # 查看状态
+./server.sh               # 打开菜单；选完一项会回来，选 0 才退出（运行中会问是否停止服务）
+./server.sh port 9000     # 保存新端口
+./server.sh port default  # 恢复默认 8765
+```
+
+### Windows
+
+1. 把整个 NetPull 文件夹拷到 Windows
+2. 双击 `server.bat`，在菜单里选 `1` 启动、`2` 停止、`5` 修改分享目录、`6` 修改端口；做完一项会回到菜单，选 `0` 才退出。若服务在运行，退出前会询问是否停止
+3. 把窗口里的 `http://192.168.x.x:8765/` 发给同事
+
+命令提示符里也可以直接带命令：
+
+```bat
+cd /d D:\NetPull
+server.bat start
+server.bat stop
+server.bat restart
+server.bat status
+server.bat dir D:\share
+server.bat dir default
+server.bat port 9000
+server.bat port default
+```
+
+关掉启动时弹出的黑窗口，不会把后台服务一起关掉。
+
+## 如何放文件
+
+分享目录是下级 `down/`，不是当前根目录。
+
+```text
+NetPull/                   ← 启动脚本放这里，网页上看不到
+├── server.sh              macOS / Linux 控制脚本
+├── server.bat / server.ps1
+├── file_server.py
+├── README.md
+├── 使用说明.md
+└── down/                  ← 只分享这里
+    ├── 产品说明.txt
+    ├── 会议纪要.pdf
+    ├── 安装包.zip
+    └── 文档/
+```
+
+把文件或文件夹丢进 `down/`，浏览器刷新即可。点文件是下载，点文件夹是进入。
+
+`down` 不存在时，启动时会自动创建。
+
+## 页面功能
+
+打开分享地址后可以：
+
+- 按文件名搜索（快捷键 `/`，`Esc` 清空）
+- 看类型、大小、修改日期
+- 沿面包屑返回上级
+- 跟随系统亮色 / 暗色
+- 目录里即使有 `index.html`，也先显示分享列表；点这个文件才会打开或下载
+- 点击 Markdown 会按 UTF-8 预览正文，不再乱码；页面上可下载原文
+
+网页列表会隐藏控制脚本、`file_server.py`、`__pycache__` 和点开头文件，避免把运维文件发给同事。
+
+## 配置
+
+控制脚本读取环境变量；不设就用默认值。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PORT` | 已保存端口，没有则 `8765` | 本次启动覆盖保存值，不会写入配置 |
+| `BIND` | `0.0.0.0` | `0.0.0.0` 表示局域网可访问；`127.0.0.1` 仅本机 |
+| `PYTHON` | macOS 为 `python3`；Windows 依次尝试 `py -3` / `python` / `python3` | Python 解释器 |
+| `SHARE_DIR` | 已保存目录，没有则脚本目录下的 `down` | 本次启动覆盖保存值，不会写入配置 |
+
+macOS / Linux 示例：
+
+```bash
+PORT=9000 ./server.sh start
+PORT=9000 ./server.sh stop
+BIND=127.0.0.1 ./server.sh start
+SHARE_DIR=/other/path ./server.sh start
+PYTHON=python3.13 ./server.sh start
+```
+
+Windows 示例：
+
+```bat
+set PORT=9000
+server.bat start
+set PORT=9000
+server.bat stop
+
+set BIND=127.0.0.1
+server.bat start
+
+set PYTHON=C:\Python313\python.exe
+server.bat start
+```
+
+也可以直接启动 Python：
+
+```bash
+python3 file_server.py --bind 0.0.0.0 --port 8765 --directory ./down
+```
+
+
+## 修改分享目录
+
+默认分享目录是本程序下的 `down/`。改过之后会写入 `.file_server.share_dir`，下次启动自动用新目录。恢复默认会删掉这个文件。
+
+菜单里选 `5) 修改分享目录`：
+
+- 输入绝对路径，或相对本程序目录的路径
+- 输入 `default` 或 `默认`：恢复 `down/`
+- 直接回车：取消
+
+命令行同样可以：
+
+```bash
+./server.sh dir ~/Downloads
+./server.sh dir default
+```
+
+Windows：
+
+```bat
+server.bat dir D:\share
+server.bat dir default
+```
+
+如果改目录时服务已经在跑，会询问是否立刻重启。选否的话，要等到下次启动或手动重启才生效。菜单会显示 `已保存` 或 `默认`。
+
+环境变量 `SHARE_DIR=/other/path ./server.sh start` 只影响这一次，不会保存。
+
+## 修改端口
+
+默认端口是 `8765`。改过之后会写入 `.file_server.port`，下次启动自动用新端口。恢复默认会删掉这个文件。
+
+菜单里选 `6) 修改端口`：
+
+- 输入 `9000` 这类数字：保存为新端口
+- 输入 `default` 或 `默认`：恢复 `8765`
+- 直接回车：取消
+
+命令行同样可以：
+
+```bash
+./server.sh port 9000
+./server.sh port default
+```
+
+Windows：
+
+```bat
+server.bat port 9000
+server.bat port default
+```
+
+如果改端口时服务已经在跑，会询问是否立刻重启。选否的话，要等到下次启动或手动重启才生效。菜单会显示 `已保存` 或 `默认`。
+
+环境变量 `PORT=9000 ./server.sh start` 只影响这一次，不会保存。
+
+## 启动和停止流程
+
+```mermaid
+flowchart LR
+  A[文件放入 down] --> B["server.sh / server.bat start"]
+  B --> C[监听 8765]
+  C --> D[浏览器浏览或下载]
+  D --> E["server.sh / server.bat stop"]
+```
+
+- 启动：后台运行 `file_server.py`，PID 写入 `.file_server.pid`，日志写入 `.file_server.log`
+- 已在运行：再次执行 start 只会提示地址，不会起第二份
+- 停止：先按 PID 结束，再按端口和命令行兜底清理
+- 不带参数：进入菜单。启动、停止后会回到菜单，只有选 `0` 退出才结束脚本
+- 服务正在运行时选择退出，会询问是否同时停止；直接回车则保持后台运行
+- 菜单第 5 项可改分享目录；第 6 项可改端口。输入 `default` 分别恢复 `down/` 或 `8765`
+
+## 常见问题
+
+**网页打不开**
+
+- 先看本机 `http://127.0.0.1:8765/` 是否能开
+- 确认已经执行 `./server.sh start` 或在 `server.bat` 菜单里选了启动
+- 同事访问要用局域网 IP，不要用 `127.0.0.1`
+- 检查系统防火墙是否放行 `8765`
+
+**提示端口已被占用**
+
+```bash
+PORT=9000 ./server.sh start
+```
+
+Windows：
+
+```bat
+set PORT=9000
+server.bat start
+```
+
+**找不到 Python**
+
+- macOS：`python3 --version`
+- Windows：重新安装 Python，勾选 PATH；或设置 `PYTHON` 为 `python.exe` 的完整路径
+
+**列表是空的**
+
+文件是否放进了 `down/`。根目录里的脚本不会出现在网页上。
+
+**Windows 双击一闪而过**
+
+多半是没找到 Python，或端口被占用。用命令提示符运行 `server.bat start` 看具体报错；完整日志在 `.file_server.log`。
+
+**启动失败看日志**
+
+```bash
+tail -n 50 .file_server.log
+```
+
+Windows 可用记事本打开同目录下的 `.file_server.log`。
+
+## 安全说明
+
+- 同一网段的设备都能访问，没有密码
+- 只有浏览和下载，没有上传、删除、改名
+- 不要对公网开放，也不要做路由器端口转发
+- 需要仅本机可开时：`BIND=127.0.0.1 ./server.sh start`

@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import html
 import os
+import re
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -378,6 +379,80 @@ h1 {
 @media (prefers-reduced-motion: reduce) {
   .row, .action { transition: none; }
 }
+
+.md-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 0 4px 12px;
+}
+.md-stage {
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--panel);
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(18,24,32,.05);
+}
+.md-body {
+  padding: 28px clamp(18px, 4vw, 40px) 48px;
+  font-size: 16px;
+  line-height: 1.75;
+  overflow-x: auto;
+}
+.md-body > :first-child { margin-top: 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+  line-height: 1.2;
+  letter-spacing: -.03em;
+  font-weight: 650;
+  margin: 1.4em 0 .6em;
+}
+.md-body h1 { font-size: 1.8em; }
+.md-body h2 { font-size: 1.4em; }
+.md-body h3 { font-size: 1.18em; }
+.md-body p, .md-body ul, .md-body ol, .md-body pre, .md-body blockquote, .md-body table {
+  margin: 0 0 1em;
+}
+.md-body a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.md-body code {
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: .9em;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: .1em .35em;
+}
+.md-body pre {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px 16px;
+  overflow: auto;
+}
+.md-body pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.md-body blockquote {
+  margin: 0 0 1em;
+  padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--ink);
+  color: var(--muted);
+}
+.md-body ul, .md-body ol { padding-left: 1.4em; }
+.md-body img { max-width: 100%; height: auto; border-radius: 12px; }
+.md-body table { border-collapse: collapse; width: 100%; }
+.md-body th, .md-body td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-body th { background: var(--surface); }
+.md-body hr { border: 0; border-top: 1px solid var(--line); margin: 1.6em 0; }
 """
 
 
@@ -402,7 +477,288 @@ def parent_href(url_path: str) -> str | None:
     return "/" + "/".join(parts[:-1]) + "/"
 
 
+
+def decode_text_bytes(data: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "replace")
+
+
+def safe_href(url: str) -> str | None:
+    url = (url or "").strip()
+    if not url:
+        return None
+    if url.startswith("#"):
+        return url
+    lowered = url.lower()
+    if lowered.startswith(("javascript:", "data:", "vbscript:")):
+        return None
+    return url
+
+
+INLINE_RE = re.compile(
+    r"\\(.)"
+    r"|`([^`]+)`"
+    r"|!\[([^\]]*)\]\(([^)\s]+)(?:\s+\"([^\"]*)\")?\)"
+    r"|\[([^\]]+)\]\(([^)\s]+)(?:\s+\"([^\"]*)\")?\)"
+    r"|\*\*(.+?)\*\*"
+    r"|__(.+?)__"
+    r"|~~(.+?)~~"
+    r"|((?:https?://)[^\s<]+)"
+    r"|\*([^*\n]+)\*"
+    r"|_([^_\n]+)_"
+)
+
+
+def render_inline(text: str) -> str:
+    out: list[str] = []
+    pos = 0
+    for match in INLINE_RE.finditer(text):
+        out.append(html.escape(text[pos:match.start()]))
+        if match.group(1) is not None:
+            out.append(html.escape(match.group(1)))
+        elif match.group(2) is not None:
+            out.append("<code>" + html.escape(match.group(2)) + "</code>")
+        elif match.group(4) is not None:
+            href = safe_href(match.group(4))
+            if href:
+                out.append(
+                    f'<img src="{html.escape(href)}" alt="{html.escape(match.group(3) or "")}">'
+                )
+            else:
+                out.append(html.escape(match.group(0)))
+        elif match.group(7) is not None:
+            href = safe_href(match.group(7))
+            inner = render_inline(match.group(6))
+            if href:
+                out.append(f'<a href="{html.escape(href)}">{inner}</a>')
+            else:
+                out.append(html.escape(match.group(0)))
+        elif match.group(9) is not None:
+            out.append("<strong>" + render_inline(match.group(9)) + "</strong>")
+        elif match.group(10) is not None:
+            out.append("<strong>" + render_inline(match.group(10)) + "</strong>")
+        elif match.group(11) is not None:
+            out.append("<del>" + render_inline(match.group(11)) + "</del>")
+        elif match.group(12) is not None:
+            url = match.group(12).rstrip(".,;:!?)")
+            out.append(f'<a href="{html.escape(url)}">{html.escape(url)}</a>')
+        elif match.group(13) is not None:
+            out.append("<em>" + render_inline(match.group(13)) + "</em>")
+        elif match.group(14) is not None:
+            out.append("<em>" + render_inline(match.group(14)) + "</em>")
+        pos = match.end()
+    out.append(html.escape(text[pos:]))
+    return "".join(out)
+
+
+def _split_table_row(line: str) -> list[str]:
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [cell.strip() for cell in raw.split("|")]
+
+
+def md_to_html(src: str) -> str:
+    lines = src.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    parts: list[str] = []
+    i = 0
+    n = len(lines)
+
+    def is_ul(value: str) -> bool:
+        return re.match(r"^\s*[-*+]\s+", value) is not None
+
+    def is_ol(value: str) -> bool:
+        return re.match(r"^\s*\d+[.)]\s+", value) is not None
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        if re.match(r"^`{3,}([^`]*)$", stripped):
+            buf: list[str] = []
+            i += 1
+            while i < n and not re.match(r"^`{3,}\s*$", lines[i].strip()):
+                buf.append(lines[i])
+                i += 1
+            if i < n:
+                i += 1
+            parts.append("<pre><code>" + html.escape("\n".join(buf)) + "</code></pre>")
+            continue
+        compacted = re.sub(r"\s+", "", line)
+        if compacted[:3] in {"---", "***", "___"} and re.fullmatch(r"[-*_]{3,}", compacted):
+            parts.append("<hr>")
+            i += 1
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            title = heading.group(2).rstrip("#").rstrip()
+            parts.append(f"<h{level}>{render_inline(title)}</h{level}>")
+            i += 1
+            continue
+        if stripped.startswith(">"):
+            chunk: list[str] = []
+            while i < n and lines[i].lstrip().startswith(">"):
+                chunk.append(re.sub(r"^\s*>\s?", "", lines[i]))
+                i += 1
+            parts.append("<blockquote>" + md_to_html("\n".join(chunk)) + "</blockquote>")
+            continue
+        if "|" in line and i + 1 < n and re.match(r"^\s*\|?\s*:?-{2,}", lines[i + 1]):
+            header = _split_table_row(line)
+            i += 2
+            body_rows: list[list[str]] = []
+            while i < n and "|" in lines[i] and lines[i].strip():
+                body_rows.append(_split_table_row(lines[i]))
+                i += 1
+            thead = "<thead><tr>" + "".join(f"<th>{render_inline(cell)}</th>" for cell in header) + "</tr></thead>"
+            tbody = "<tbody>" + "".join(
+                "<tr>" + "".join(f"<td>{render_inline(cell)}</td>" for cell in row) + "</tr>"
+                for row in body_rows
+            ) + "</tbody>"
+            parts.append(f"<table>{thead}{tbody}</table>")
+            continue
+        if is_ul(line):
+            items: list[str] = []
+            while i < n and is_ul(lines[i]):
+                items.append(re.sub(r"^\s*[-*+]\s+", "", lines[i]))
+                i += 1
+            parts.append("<ul>" + "".join(f"<li>{render_inline(item)}</li>" for item in items) + "</ul>")
+            continue
+        if is_ol(line):
+            items = []
+            while i < n and is_ol(lines[i]):
+                items.append(re.sub(r"^\s*\d+[.)]\s+", "", lines[i]))
+                i += 1
+            parts.append("<ol>" + "".join(f"<li>{render_inline(item)}</li>" for item in items) + "</ol>")
+            continue
+        if not stripped:
+            i += 1
+            continue
+        para: list[str] = []
+        while i < n:
+            cur = lines[i]
+            if not cur.strip():
+                break
+            if cur.strip().startswith("```"):
+                break
+            if re.match(r"^#{1,6}\s+", cur):
+                break
+            if is_ul(cur) or is_ol(cur) or cur.lstrip().startswith(">"):
+                break
+            if "|" in cur and i + 1 < n and re.match(r"^\s*\|?\s*:?-{2,}", lines[i + 1]):
+                break
+            para.append(cur.strip())
+            i += 1
+        parts.append("<p>" + render_inline(" ".join(para)) + "</p>")
+    return "\n".join(parts)
+
+
 class ListingHandler(SimpleHTTPRequestHandler):
+    def send_head(self):
+        path = self.translate_path(self.path)
+        if os.path.isdir(path):
+            parts = urllib.parse.urlsplit(self.path)
+            if not parts.path.endswith("/"):
+                self.send_response(301)
+                new_url = urllib.parse.urlunsplit(
+                    (parts.scheme, parts.netloc, parts.path + "/", parts.query, parts.fragment)
+                )
+                self.send_header("Location", new_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            return self.list_directory(path)
+        parsed = urllib.parse.urlsplit(self.path)
+        raw = urllib.parse.parse_qs(parsed.query).get("raw", [""])[0].lower() in {"1", "true", "yes"}
+        if Path(path).suffix.lower() in {".md", ".markdown", ".mdown"} and not raw:
+            return self.preview_markdown(path)
+        return super().send_head()
+
+    def guess_type(self, path):  # type: ignore[override]
+        ctype = super().guess_type(path)
+        ext = Path(str(path)).suffix.lower()
+        if ext in {".md", ".markdown", ".mdown"}:
+            ctype = "text/markdown"
+        if ctype.startswith("text/") or ctype in {
+            "application/json",
+            "application/javascript",
+            "application/xml",
+        }:
+            if "charset=" not in ctype.lower():
+                ctype += "; charset=utf-8"
+        return ctype
+
+    def preview_markdown(self, path: str):
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            self.send_error(404, "File not found")
+            return None
+
+        rendered = md_to_html(decode_text_bytes(data))
+        root_name = "内网下载"
+        path_only = urllib.parse.urlsplit(self.path).path
+        display_path = urllib.parse.unquote(path_only)
+        file_name = Path(display_path).name or "Markdown"
+        back_href = parent_href(path_only) or "/"
+        raw_href = path_only + "?raw=1"
+
+        crumb_html = []
+        parts = [p for p in display_path.split("/") if p]
+        acc = ""
+        crumb_html.append(f'<a class="crumb" href="/">{html.escape(root_name)}</a>')
+        for i, part in enumerate(parts):
+            crumb_html.append('<span class="sep">/</span>')
+            acc += "/" + part
+            is_last = i == len(parts) - 1
+            href = acc if is_last else acc + "/"
+            cls = "crumb current" if is_last else "crumb"
+            crumb_html.append(
+                f'<a class="{cls}" href="{html.escape(href)}">{html.escape(part)}</a>'
+            )
+
+        page = f"""<!DOCTYPE HTML>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(file_name)}</title>
+<style>{STYLE}</style>
+</head>
+<body>
+<main class="page">
+  <header class="mast">
+    <div class="hero">
+      <nav class="crumbs">{''.join(crumb_html)}</nav>
+      <h1>{html.escape(file_name)}</h1>
+    </div>
+  </header>
+  <div class="md-toolbar">
+    <a class="action" href="{html.escape(back_href)}">返回</a>
+    <a class="action" href="{html.escape(raw_href)}">下载原文</a>
+  </div>
+  <section class="md-stage">
+    <article class="md-body">
+{rendered}
+    </article>
+  </section>
+</main>
+</body>
+</html>
+"""
+        encoded = page.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+        return None
+
     def list_directory(self, path: str):  # type: ignore[override]
         try:
             entries = list(os.scandir(path))
@@ -411,10 +767,7 @@ class ListingHandler(SimpleHTTPRequestHandler):
             return None
 
         entries.sort(key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower()))
-        cwd = Path(os.getcwd())
-        root_name = cwd.name or "文件"
-        if root_name.lower() == "down" and cwd.parent.name:
-            root_name = cwd.parent.name
+        root_name = "内网下载"
         display_path = urllib.parse.unquote(self.path)
         current_name = Path(display_path.rstrip("/") or root_name).name or root_name
 
@@ -469,7 +822,8 @@ class ListingHandler(SimpleHTTPRequestHandler):
             kind_label, kind_key = file_kind(name, is_dir)
             display_name = name + ("/" if is_dir else "")
             href = urllib.parse.quote(display_name)
-            action = "打开" if is_dir else "下载"
+            is_markdown = (not is_dir) and Path(name).suffix.lower() in {".md", ".markdown", ".mdown"}
+            action = "打开" if is_dir or is_markdown else "下载"
             visible += 1
             rows.append(
                 '<article class="row" data-name="' + html.escape(name.lower()) + '">'
