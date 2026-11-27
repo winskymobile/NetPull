@@ -18,12 +18,16 @@ $Bind = if ($env:BIND) { $env:BIND } else { "0.0.0.0" }
 $script:DefaultPort = 8765
 $script:PortFile = Join-Path $Root ".file_server.port"
 $script:RuntimePortFile = Join-Path $Root ".file_server.runtime_port"
+$script:RuntimeUploadFile = Join-Path $Root ".file_server.runtime_upload"
 $script:PortFromEnv = $env:PORT
 $script:Port = $script:DefaultPort
 $script:DefaultShareDir = Join-Path $Root "down"
 $script:ShareFile = Join-Path $Root ".file_server.share_dir"
 $script:RuntimeShareFile = Join-Path $Root ".file_server.runtime_share"
 $script:ShareFromEnv = $env:SHARE_DIR
+$script:UploadPasswordFromEnv = -not [string]::IsNullOrEmpty($env:UPLOAD_PASSWORD)
+$script:UploadPassword = if ($env:UPLOAD_PASSWORD) { $env:UPLOAD_PASSWORD } else { "0000" }
+$env:UPLOAD_PASSWORD = $script:UploadPassword
 $script:ShareDir = $script:DefaultShareDir
 $script:ShowDetails = $true
 
@@ -344,6 +348,15 @@ function Resolve-Python {
     return $null
 }
 
+function ConvertFrom-SecureInput([System.Security.SecureString]$Value) {
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+}
+
 function Show-Usage {
     Write-Host "用法: server.bat [start|stop|restart|status|dir|port]"
     Write-Host ""
@@ -367,6 +380,10 @@ function Invoke-Status {
         if ($script:ShowDetails) {
             Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
             Write-Host ("端口: {0} ({1})" -f $script:Port, (Get-PortLabel))
+            if (Test-Path -LiteralPath $script:RuntimeUploadFile) {
+                $uploadState = (Get-Content -LiteralPath $script:RuntimeUploadFile -Raw).Trim()
+                Write-Host ("上传: {0}" -f $(if ($uploadState -eq "1") { "已启用" } else { "已关闭" }))
+            }
             Write-Urls -ShowPort (Get-ActivePort)
             Write-Host "日志: $LogFile"
         }
@@ -413,6 +430,42 @@ function Invoke-Start {
         return
     }
 
+    $enableUpload = $false
+    if (-not [Console]::IsInputRedirected) {
+        $answer = Read-Host "是否启用上传功能？ [y/N]"
+        $enableUpload = $answer -match '^(?i:y|yes|是)$'
+    } else {
+        Write-Dim "非交互启动，上传功能保持关闭"
+    }
+
+    if ($enableUpload -and -not [Console]::IsInputRedirected) {
+        if ($script:UploadPasswordFromEnv) {
+            Write-Dim "上传密码由环境变量 UPLOAD_PASSWORD 提供。"
+        } else {
+            Write-Hi "当前上传密码为默认值：0000"
+        }
+        $changePassword = Read-Host "是否修改上传密码？ [y/N]"
+        if ($changePassword -match '^(?i:y|yes|是)$') {
+            while ($true) {
+                $firstSecure = Read-Host "输入新上传密码" -AsSecureString
+                $secondSecure = Read-Host "再次输入新密码" -AsSecureString
+                $firstPassword = ConvertFrom-SecureInput $firstSecure
+                $secondPassword = ConvertFrom-SecureInput $secondSecure
+                if ([string]::IsNullOrEmpty($firstPassword)) {
+                    Write-Warn "密码不能为空，请重新输入。"
+                    continue
+                }
+                if ($firstPassword -ceq $secondPassword) {
+                    $script:UploadPassword = $firstPassword
+                    $env:UPLOAD_PASSWORD = $firstPassword
+                    Write-Ok "本次启动将使用新密码。"
+                    break
+                }
+                Write-Warn "两次输入不一致，请重新输入。"
+            }
+        }
+    }
+
     "" | Set-Content -LiteralPath $LogFile -Encoding UTF8
     "" | Set-Content -LiteralPath $ErrLog -Encoding UTF8
 
@@ -424,6 +477,7 @@ function Invoke-Start {
         "--port", "$script:Port",
         "--directory", $script:ShareDir
     )
+    if ($enableUpload) { $argList += "--enable-upload" }
 
     try {
         $proc = Start-Process -FilePath $py.Exe -ArgumentList $argList -WorkingDirectory $Root -RedirectStandardOutput $LogFile -RedirectStandardError $ErrLog -WindowStyle Hidden -PassThru
@@ -452,17 +506,20 @@ function Invoke-Start {
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:RuntimePortFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:RuntimeShareFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:RuntimeUploadFile -Force -ErrorAction SilentlyContinue
         try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
         return
     }
 
     Set-Content -LiteralPath $script:RuntimePortFile -Value "$($script:Port)" -Encoding ASCII
     Set-Content -LiteralPath $script:RuntimeShareFile -Value "$($script:ShareDir)" -Encoding UTF8
+    Set-Content -LiteralPath $script:RuntimeUploadFile -Value $(if ($enableUpload) { "1" } else { "0" }) -Encoding ASCII
     Write-Ok "已启动内网文件服务 (PID $($proc.Id))"
     if ($script:ShowDetails) {
         Write-Host ("目录: {0} ({1})" -f $script:ShareDir, (Get-ShareLabel))
         Write-Urls
         Write-Host "日志: $LogFile"
+        Write-Host ("上传: {0}" -f $(if ($enableUpload) { "已启用" } else { "已关闭" }))
         Write-Host "停止: server.bat stop"
     }
 }
@@ -473,6 +530,7 @@ function Invoke-Stop {
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:RuntimePortFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:RuntimeShareFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:RuntimeUploadFile -Force -ErrorAction SilentlyContinue
         Write-Warn "服务未运行"
         return
     }
@@ -497,6 +555,7 @@ function Invoke-Stop {
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $script:RuntimePortFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $script:RuntimeShareFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:RuntimeUploadFile -Force -ErrorAction SilentlyContinue
     Write-Warn "已停止内网文件服务"
     if ($script:ShowDetails -and (Test-Path -LiteralPath $LogFile)) {
         Write-Host "日志: $LogFile"

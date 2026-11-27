@@ -10,7 +10,15 @@ PORT_FILE="$ROOT/.file_server.port"
 RUNTIME_PORT_FILE="$ROOT/.file_server.runtime_port"
 SHARE_FILE="$ROOT/.file_server.share_dir"
 RUNTIME_SHARE_FILE="$ROOT/.file_server.runtime_share"
+RUNTIME_UPLOAD_FILE="$ROOT/.file_server.runtime_upload"
 BIND="${BIND:-0.0.0.0}"
+if [[ -n "${UPLOAD_PASSWORD:-}" ]]; then
+  UPLOAD_PASSWORD_FROM_ENV=1
+else
+  UPLOAD_PASSWORD_FROM_ENV=0
+fi
+UPLOAD_PASSWORD="${UPLOAD_PASSWORD:-0000}"
+export UPLOAD_PASSWORD
 DEFAULT_PORT=8765
 DEFAULT_SHARE_DIR="$ROOT/down"
 if [[ -n "${PORT:-}" ]]; then
@@ -384,6 +392,13 @@ cmd_status() {
     if is_verbose; then
       echo "目录: $SHARE_DIR ($(share_source_label))"
       echo "端口: $PORT ($(port_source_label))"
+      if [[ -f "$RUNTIME_UPLOAD_FILE" ]]; then
+        if [[ "$(tr -d '[:space:]' < "$RUNTIME_UPLOAD_FILE" || true)" == "1" ]]; then
+          echo "上传: 已启用"
+        else
+          echo "上传: 已关闭"
+        fi
+      fi
       print_urls "$(active_port)"
       echo "日志: $LOG_FILE"
     fi
@@ -431,8 +446,56 @@ cmd_start() {
     return 1
   fi
 
+  local enable_upload=0 answer new_password confirm_password
+  if [[ -t 0 ]]; then
+    printf '%s' "是否启用上传功能？ [y/N] "
+    read -r answer
+    case "${answer:-}" in
+      y|Y|yes|YES|是) enable_upload=1 ;;
+      *) enable_upload=0 ;;
+    esac
+  else
+    say dim "非交互启动，上传功能保持关闭"
+  fi
+
+  if [[ "$enable_upload" == 1 && -t 0 ]]; then
+    if [[ "$UPLOAD_PASSWORD_FROM_ENV" == 1 ]]; then
+      say dim "上传密码由环境变量 UPLOAD_PASSWORD 提供。"
+    else
+      say cyan "当前上传密码为默认值：0000"
+    fi
+    printf '%s' "是否修改上传密码？ [y/N] "
+    read -r answer
+    case "${answer:-}" in
+      y|Y|yes|YES|是)
+        while true; do
+          read -r -s -p "输入新上传密码: " new_password
+          printf '\n'
+          if [[ -z "$new_password" ]]; then
+            say yellow "密码不能为空，请重新输入。"
+            continue
+          fi
+          read -r -s -p "再次输入新密码: " confirm_password
+          printf '\n'
+          if [[ "$new_password" == "$confirm_password" ]]; then
+            UPLOAD_PASSWORD="$new_password"
+            export UPLOAD_PASSWORD
+            say green "本次启动将使用新密码。"
+            break
+          fi
+          say yellow "两次输入不一致，请重新输入。"
+        done
+        ;;
+      *) ;;
+    esac
+  fi
+
   : > "$LOG_FILE"
-  nohup "$PY" "$SERVER" --bind "$BIND" --port "$PORT" --directory "$SHARE_DIR" >>"$LOG_FILE" 2>&1 &
+  if [[ "$enable_upload" == 1 ]]; then
+    nohup "$PY" "$SERVER" --bind "$BIND" --port "$PORT" --directory "$SHARE_DIR" --enable-upload >>"$LOG_FILE" 2>&1 &
+  else
+    nohup "$PY" "$SERVER" --bind "$BIND" --port "$PORT" --directory "$SHARE_DIR" >>"$LOG_FILE" 2>&1 &
+  fi
   pid="$!"
   disown "$pid" 2>/dev/null || true
   echo "$pid" > "$PID_FILE"
@@ -453,16 +516,22 @@ cmd_start() {
   if [[ "$ok" -ne 1 ]]; then
     say red "启动失败，最近日志:"
     tail -n 40 "$LOG_FILE" || true
-    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE"
+    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE" "$RUNTIME_UPLOAD_FILE"
     return 1
   fi
 
   printf '%s\n' "$PORT" > "$RUNTIME_PORT_FILE"
   printf '%s\n' "$SHARE_DIR" > "$RUNTIME_SHARE_FILE"
+  printf '%s\n' "$enable_upload" > "$RUNTIME_UPLOAD_FILE"
   say green "已启动内网文件服务 (PID ${pid})"
   if is_verbose; then
     echo "目录: $SHARE_DIR ($(share_source_label))"
     print_urls
+    if [[ "$enable_upload" == 1 ]]; then
+      echo "上传: 已启用"
+    else
+      echo "上传: 已关闭"
+    fi
     echo "日志: $LOG_FILE"
     echo "停止: ./server.sh stop"
   fi
@@ -472,7 +541,7 @@ cmd_stop() {
   local pids pid
   pids="$(collect_pids || true)"
   if [[ -z "$pids" ]]; then
-    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE"
+    rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE" "$RUNTIME_UPLOAD_FILE"
     say yellow "服务未运行"
     return 0
   fi
@@ -497,7 +566,7 @@ cmd_stop() {
     return 1
   fi
 
-  rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE"
+  rm -f "$PID_FILE" "$RUNTIME_PORT_FILE" "$RUNTIME_SHARE_FILE" "$RUNTIME_UPLOAD_FILE"
   say yellow "已停止内网文件服务"
   if is_verbose && [[ -f "$LOG_FILE" ]]; then
     echo "日志: $LOG_FILE"

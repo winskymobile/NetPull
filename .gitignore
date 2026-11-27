@@ -13,6 +13,7 @@ __pycache__/
 .file_server.runtime_port
 .file_server.share_dir
 .file_server.runtime_share
+.file_server.runtime_upload
 
 # shared payload, not source
 down/*

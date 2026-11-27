@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hmac
 import html
+import json
 import os
 import re
+import shutil
+import tempfile
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 KIND_BY_EXT = {
     ".pdf": ("PDF", "pdf"),
@@ -45,6 +49,15 @@ KIND_BY_EXT = {
     ".mp4": ("影片", "video"),
     ".mov": ("影片", "video"),
     ".mkv": ("影片", "video"),
+    ".webm": ("影片", "video"),
+    ".avi": ("影片", "video"),
+    ".wmv": ("影片", "video"),
+    ".flv": ("影片", "video"),
+    ".m4v": ("影片", "video"),
+    ".mpeg": ("影片", "video"),
+    ".mpg": ("影片", "video"),
+    ".3gp": ("影片", "video"),
+    ".ogv": ("影片", "video"),
     ".mp3": ("音频", "audio"),
     ".wav": ("音频", "audio"),
     ".aac": ("音频", "audio"),
@@ -55,6 +68,14 @@ KIND_BY_EXT = {
     ".ipa": ("iOS 应用", "app"),
     ".apk": ("Android 应用", "app"),
 }
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".flv",
+    ".m4v", ".mpeg", ".mpg", ".3gp", ".ogv",
+}
+
+SHARE_ROOT = Path(__file__).resolve().parent / "down"
+UPLOAD_ENABLED = False
+UPLOAD_PASSWORD = os.environ.get("UPLOAD_PASSWORD", "0000")
 
 
 def human_size(num: int) -> str:
@@ -327,6 +348,115 @@ h1 {
 }
 .action:hover { opacity: .88; }
 .action:active { transform: scale(.98); }
+.upload-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 68px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.upload-button { border: 0; cursor: pointer; font: inherit; font-size: 14px; }
+.upload-button:disabled { opacity: .5; cursor: not-allowed; }
+.upload-status { min-width: 80px; margin: 0; color: var(--muted); font-size: 13px; }
+.upload-dialog {
+  width: min(560px, calc(100vw - 32px));
+  padding: 32px;
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 28px 90px rgba(0,0,0,.24);
+}
+.upload-dialog::backdrop { background: rgba(12,18,24,.42); backdrop-filter: blur(3px); }
+.upload-dialog h2 { margin: 0; font-size: 24px; line-height: 1.2; letter-spacing: -.025em; }
+.upload-dialog p { margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+.upload-dialog-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .18s var(--ease), background .18s var(--ease), transform .18s var(--ease);
+}
+.upload-dialog-close:hover { color: var(--ink); background: var(--hover); }
+.upload-dialog-close:active { transform: scale(.96); }
+.upload-dialog-close svg { width: 17px; height: 17px; }
+.upload-dialog-title { padding-right: 42px; }
+.upload-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 26px; }
+.upload-choice-card {
+  min-width: 0;
+  min-height: 168px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 17px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: center;
+  font: inherit;
+  cursor: pointer;
+  transition: background .18s var(--ease), border-color .18s var(--ease), transform .18s var(--ease);
+}
+.upload-choice-card:hover { background: var(--hover); border-color: rgba(18,24,32,.2); transform: translateY(-2px); }
+.upload-choice-card:active { transform: translateY(0) scale(.99); }
+.upload-choice-card:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+.upload-choice-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 13px; background: var(--panel); color: var(--ink); }
+.upload-choice-icon svg { width: 25px; height: 25px; }
+.upload-choice-copy { display: grid; justify-items: center; gap: 5px; }
+.upload-choice-copy strong { font-size: 16px; font-weight: 600; }
+.upload-choice-copy span { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.upload-password-form { display: grid; gap: 16px; }
+.upload-password-form .upload-dialog-title { margin-bottom: 2px; }
+.upload-dialog input {
+  width: 100%; height: 46px; padding: 0 13px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--surface); color: var(--ink); font: inherit;
+}
+.upload-dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.upload-dialog .dialog-actions button {
+  min-height: 42px; padding: 0 18px; border: 0; border-radius: 999px;
+  background: var(--action); color: var(--action-text); font: inherit; cursor: pointer;
+}
+.upload-progress-file {
+  display: grid;
+  gap: 7px;
+  margin-top: 26px;
+}
+.upload-progress-file-label { color: var(--muted); font-size: 12px; }
+.upload-progress-file-name { overflow: hidden; color: var(--ink); font-size: 14px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.upload-progress-track {
+  width: 100%;
+  height: 9px;
+  margin-top: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface);
+}
+.upload-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink);
+  transition: width .16s linear;
+}
+.upload-progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.upload-progress-summary { min-height: 22px; margin-top: 18px !important; }
+.upload-progress-close:disabled { opacity: .4; cursor: wait; }
 .empty {
   padding: 64px 24px;
   text-align: center;
@@ -364,6 +494,7 @@ h1 {
 @media (max-width: 720px) {
   .mast { flex-direction: column; align-items: stretch; }
   .search { width: 100%; height: 50px; border-radius: 14px; }
+  .upload-row { padding: 12px 16px; }
   .search-hint { display: none; }
   .list-meta { margin: 0 0 10px; }
   .head { display: none; }
@@ -375,6 +506,14 @@ h1 {
   }
   .icon { width: 44px; height: 44px; border-radius: 12px; }
   .action { height: 36px; min-width: 68px; padding: 0 12px; }
+}
+@media (max-width: 480px) {
+  .upload-dialog { padding: 26px 20px 20px; border-radius: 18px; }
+  .upload-choice-grid { grid-template-columns: 1fr; gap: 9px; margin-top: 20px; }
+  .upload-choice-card { min-height: 132px; flex-direction: column; align-items: center; gap: 11px; padding: 16px; }
+  .upload-choice-card > .upload-choice-copy { flex: none; text-align: center; }
+  .upload-choice-card > .upload-choice-icon { flex: none; }
+  .upload-progress-meta { align-items: flex-start; flex-direction: column; gap: 4px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .row, .action { transition: none; }
@@ -659,6 +798,129 @@ def md_to_html(src: str) -> str:
 
 
 class ListingHandler(SimpleHTTPRequestHandler):
+    def _send_upload_json(self, status: int, payload: dict[str, str]) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_PUT(self):  # noqa: N802
+        if not UPLOAD_ENABLED:
+            self._send_upload_json(403, {"result": "disabled", "message": "上传未启用"})
+            return
+
+        supplied_password = urllib.parse.unquote(self.headers.get("X-Upload-Password", ""))
+        if not hmac.compare_digest(
+            supplied_password.encode("utf-8"), UPLOAD_PASSWORD.encode("utf-8")
+        ):
+            self._send_upload_json(403, {"result": "denied", "message": "密码错误"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._send_upload_json(411, {"result": "invalid", "message": "缺少有效文件长度"})
+            return
+        if content_length < 0:
+            self._send_upload_json(400, {"result": "invalid", "message": "文件长度无效"})
+            return
+
+        relative_name = urllib.parse.unquote(self.headers.get("X-Upload-Path", ""))
+        parts = relative_name.split("/")
+        windows_path = PureWindowsPath(relative_name)
+        if (
+            not relative_name
+            or relative_name.startswith("/")
+            or "\\" in relative_name
+            or windows_path.is_absolute()
+            or windows_path.drive
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(ord(char) < 32 or ord(char) == 127 for char in relative_name)
+        ):
+            self._send_upload_json(400, {"result": "invalid", "message": "上传路径无效"})
+            return
+
+        share_root = SHARE_ROOT.resolve()
+        try:
+            current_dir = Path(self.translate_path(self.path)).resolve(strict=True)
+            current_dir.relative_to(share_root)
+            if not current_dir.is_dir():
+                raise ValueError("upload target is not a directory")
+
+            destination_dir = current_dir
+            for part in parts[:-1]:
+                next_dir = destination_dir / part
+                if not next_dir.exists():
+                    try:
+                        next_dir.mkdir()
+                    except FileExistsError:
+                        pass
+                resolved_dir = next_dir.resolve(strict=True)
+                resolved_dir.relative_to(share_root)
+                if not resolved_dir.is_dir():
+                    raise ValueError("upload parent is not a directory")
+                destination_dir = resolved_dir
+
+            destination = destination_dir / parts[-1]
+            if os.path.lexists(destination):
+                self._send_upload_json(409, {"result": "skipped", "message": "同名文件已存在"})
+                return
+        except (OSError, RuntimeError, ValueError):
+            self._send_upload_json(400, {"result": "invalid", "message": "上传目录无效"})
+            return
+
+        temporary_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=".netpull-upload-", suffix=".tmp",
+                dir=destination_dir, delete=False
+            ) as temporary_file:
+                temporary_path = temporary_file.name
+                remaining = content_length
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise OSError("connection closed before upload completed")
+                    temporary_file.write(chunk)
+                    remaining -= len(chunk)
+
+            try:
+                # A hard link publishes the completed file atomically without replacing a peer upload.
+                os.link(temporary_path, destination)
+            except FileExistsError:
+                self._send_upload_json(409, {"result": "skipped", "message": "同名文件已存在"})
+                return
+            except OSError:
+                # Some filesystems do not support hard links; exclusive creation still prevents overwrite.
+                target_created = False
+                try:
+                    with open(temporary_path, "rb") as source, open(destination, "xb") as target:
+                        target_created = True
+                        shutil.copyfileobj(source, target, length=1024 * 1024)
+                except FileExistsError:
+                    self._send_upload_json(409, {"result": "skipped", "message": "同名文件已存在"})
+                    return
+                except OSError:
+                    if target_created:
+                        try:
+                            os.unlink(destination)
+                        except FileNotFoundError:
+                            pass
+                    raise
+
+            self._send_upload_json(201, {"result": "uploaded", "message": "上传完成"})
+        except OSError:
+            self._send_upload_json(400, {"result": "failed", "message": "文件上传失败"})
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+
     def send_head(self):
         path = self.translate_path(self.path)
         if os.path.isdir(path):
@@ -674,12 +936,29 @@ class ListingHandler(SimpleHTTPRequestHandler):
                 return None
             return self.list_directory(path)
         parsed = urllib.parse.urlsplit(self.path)
-        raw = urllib.parse.parse_qs(parsed.query).get("raw", [""])[0].lower() in {"1", "true", "yes"}
-        if Path(path).suffix.lower() in {".md", ".markdown", ".mdown"} and not raw:
+        query = urllib.parse.parse_qs(parsed.query)
+        raw = query.get("raw", [""])[0].lower() in {"1", "true", "yes"}
+        force_download = query.get("download", [""])[0].lower() in {"1", "true", "yes"}
+        if Path(path).suffix.lower() in {".md", ".markdown", ".mdown"} and not raw and not force_download:
             return self.preview_markdown(path)
+        self._force_download = force_download
         return super().send_head()
 
+    def end_headers(self):
+        if getattr(self, "_force_download", False):
+            name = Path(self.translate_path(self.path)).name
+            encoded_name = urllib.parse.quote(name, safe="")
+            fallback_name = name.encode("ascii", "ignore").decode("ascii")
+            fallback_name = re.sub(r"[^A-Za-z0-9._-]", "_", fallback_name) or "download"
+            self.send_header(
+                "Content-Disposition",
+                f"attachment; filename=\"{fallback_name}\"; filename*=UTF-8''{encoded_name}",
+            )
+        super().end_headers()
+
     def guess_type(self, path):  # type: ignore[override]
+        if getattr(self, "_force_download", False):
+            return "application/octet-stream"
         ctype = super().guess_type(path)
         ext = Path(str(path)).suffix.lower()
         if ext in {".md", ".markdown", ".mdown"}:
@@ -822,12 +1101,14 @@ class ListingHandler(SimpleHTTPRequestHandler):
             kind_label, kind_key = file_kind(name, is_dir)
             display_name = name + ("/" if is_dir else "")
             href = urllib.parse.quote(display_name)
-            is_markdown = (not is_dir) and Path(name).suffix.lower() in {".md", ".markdown", ".mdown"}
-            action = "打开" if is_dir or is_markdown else "下载"
+            is_video = (not is_dir) and Path(name).suffix.lower() in VIDEO_EXTENSIONS
+            file_href = href + "?download=1" if not is_dir and not is_video else href
+            action = "打开" if is_dir else ("播放" if is_video else "下载")
+            action_href = href if is_dir or is_video else file_href
             visible += 1
             rows.append(
                 '<article class="row" data-name="' + html.escape(name.lower()) + '">'
-                f'<a class="hit" href="{html.escape(href)}">'
+                f'<a class="hit" href="{html.escape(file_href)}">'
                 f'<span class="icon">{icon_svg(kind_key)}</span>'
                 '<span class="copy">'
                 f'<span class="name">{html.escape(name)}</span>'
@@ -836,7 +1117,7 @@ class ListingHandler(SimpleHTTPRequestHandler):
                 f'<span class="size">{html.escape(size)}</span>'
                 f'<span class="date">{html.escape(mtime)}</span>'
                 "</a>"
-                f'<a class="action" href="{html.escape(href)}">{action}</a>'
+                f'<a class="action" href="{html.escape(action_href)}">{action}</a>'
                 "</article>"
             )
 
@@ -873,6 +1154,300 @@ class ListingHandler(SimpleHTTPRequestHandler):
                 "<span>大小</span><span>日期</span><span></span></div>"
             )
 
+        upload_controls = ""
+        upload_script = ""
+        if UPLOAD_ENABLED:
+            upload_controls = """
+<div class="upload-row">
+  <span class="upload-status" id="upload-status" aria-live="polite">上传到当前目录</span>
+  <button class="action upload-button" id="upload-open-button" type="button">上传</button>
+  <input class="hidden" id="upload-files" type="file" multiple>
+  <input class="hidden" id="upload-folder" type="file" multiple webkitdirectory directory>
+</div>
+<dialog class="upload-dialog" id="upload-choice-dialog" aria-labelledby="upload-choice-title" aria-describedby="upload-choice-description">
+  <button class="upload-dialog-close" id="upload-choice-close" type="button" aria-label="关闭">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+      <path d="m6 6 12 12M18 6 6 18"/>
+    </svg>
+  </button>
+  <div class="upload-dialog-title">
+    <h2 id="upload-choice-title">选择上传方式</h2>
+    <p id="upload-choice-description">选择要上传到当前目录的内容。</p>
+  </div>
+  <div class="upload-choice-grid">
+    <button class="upload-choice-card" id="upload-file-choice" type="button">
+      <span class="upload-choice-icon">
+        <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 5.5h8l6 6V25a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2Z"/>
+          <path d="M18 5.8v6h6M16 16v8m-3-3 3 3 3-3"/>
+        </svg>
+      </span>
+      <span class="upload-choice-copy">
+        <strong>上传文件</strong>
+        <span>选择一个或多个文件</span>
+      </span>
+    </button>
+    <button class="upload-choice-card" id="upload-folder-choice" type="button">
+      <span class="upload-choice-icon">
+        <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4.5 10a2 2 0 0 1 2-2h7l3 3h9a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-19a2 2 0 0 1-2-2V10Z"/>
+          <path d="M16 15v8m-3-3 3 3 3-3"/>
+        </svg>
+      </span>
+      <span class="upload-choice-copy">
+        <strong>上传文件夹</strong>
+        <span>保留文件夹名称与子目录</span>
+      </span>
+    </button>
+  </div>
+</dialog>
+<dialog class="upload-dialog" id="upload-password-dialog" aria-labelledby="upload-password-title" aria-describedby="upload-password-description">
+  <button class="upload-dialog-close" id="upload-password-close" type="button" aria-label="关闭">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+      <path d="m6 6 12 12M18 6 6 18"/>
+    </svg>
+  </button>
+  <form class="upload-password-form" method="dialog">
+    <div class="upload-dialog-title">
+      <h2 id="upload-password-title">上传验证</h2>
+      <p id="upload-password-description">请输入上传密码后开始上传。</p>
+    </div>
+    <input id="upload-password" type="password" autocomplete="current-password" required aria-label="上传密码">
+    <div class="dialog-actions">
+      <button type="submit" value="upload">确认上传</button>
+    </div>
+  </form>
+</dialog>
+<dialog class="upload-dialog" id="upload-progress-dialog" aria-labelledby="upload-progress-title" aria-describedby="upload-progress-description">
+  <button class="upload-dialog-close upload-progress-close" id="upload-progress-close" type="button" aria-label="关闭" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+      <path d="m6 6 12 12M18 6 6 18"/>
+    </svg>
+  </button>
+  <div class="upload-dialog-title">
+    <h2 id="upload-progress-title">正在上传</h2>
+    <p id="upload-progress-description">正在准备文件…</p>
+  </div>
+  <div class="upload-progress-file">
+    <span class="upload-progress-file-label">当前文件</span>
+    <span class="upload-progress-file-name" id="upload-progress-file">—</span>
+  </div>
+  <div class="upload-progress-track" id="upload-progress-bar" role="progressbar" aria-label="上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <span class="upload-progress-fill" id="upload-progress-fill"></span>
+  </div>
+  <div class="upload-progress-meta">
+    <span id="upload-progress-percent">0%</span>
+    <span id="upload-progress-bytes">0 B / 0 B</span>
+  </div>
+  <p class="upload-progress-summary" id="upload-progress-summary" aria-live="polite">等待上传</p>
+</dialog>
+"""
+            upload_script = """
+<script>
+(() => {
+  const fileInput = document.getElementById("upload-files");
+  const folderInput = document.getElementById("upload-folder");
+  const uploadButton = document.getElementById("upload-open-button");
+  const choiceDialog = document.getElementById("upload-choice-dialog");
+  const choiceClose = document.getElementById("upload-choice-close");
+  const fileChoice = document.getElementById("upload-file-choice");
+  const folderChoice = document.getElementById("upload-folder-choice");
+  const status = document.getElementById("upload-status");
+  const passwordDialog = document.getElementById("upload-password-dialog");
+  const passwordClose = document.getElementById("upload-password-close");
+  const passwordInput = document.getElementById("upload-password");
+  const progressDialog = document.getElementById("upload-progress-dialog");
+  const progressClose = document.getElementById("upload-progress-close");
+  const progressTitle = document.getElementById("upload-progress-title");
+  const progressDescription = document.getElementById("upload-progress-description");
+  const progressFile = document.getElementById("upload-progress-file");
+  const progressBar = document.getElementById("upload-progress-bar");
+  const progressFill = document.getElementById("upload-progress-fill");
+  const progressPercent = document.getElementById("upload-progress-percent");
+  const progressBytes = document.getElementById("upload-progress-bytes");
+  const progressSummary = document.getElementById("upload-progress-summary");
+  let uploadInProgress = false;
+
+  uploadButton.addEventListener("click", () => choiceDialog.showModal());
+  choiceClose.addEventListener("click", () => choiceDialog.close());
+  passwordClose.addEventListener("click", () => passwordDialog.close());
+  progressClose.addEventListener("click", () => {
+    if (!uploadInProgress) progressDialog.close();
+  });
+  progressDialog.addEventListener("cancel", (event) => {
+    if (uploadInProgress) event.preventDefault();
+  });
+  fileChoice.addEventListener("click", () => {
+    fileInput.value = "";
+    choiceDialog.close();
+    fileInput.click();
+  });
+  folderChoice.addEventListener("click", () => {
+    folderInput.value = "";
+    choiceDialog.close();
+    folderInput.click();
+  });
+  if (!("webkitdirectory" in folderInput)) {
+    folderChoice.disabled = true;
+    folderChoice.title = "当前浏览器暂不支持文件夹选择";
+  }
+
+  const askPassword = () => new Promise((resolve) => {
+    passwordInput.value = "";
+    passwordDialog.returnValue = "";
+    passwordDialog.addEventListener("close", () => {
+      resolve(passwordDialog.returnValue === "upload" ? passwordInput.value : null);
+    }, { once: true });
+    passwordDialog.showModal();
+    passwordInput.focus();
+  });
+
+  const formatBytes = (bytes) => {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let size = bytes / 1024;
+    let index = 0;
+    while (size >= 1024 && index < units.length - 1) {
+      size /= 1024;
+      index++;
+    }
+    return `${size.toFixed(1)} ${units[index]}`;
+  };
+
+  async function uploadSelection(input) {
+    const files = [...input.files];
+    input.value = "";
+    if (!files.length) return;
+
+    const password = await askPassword();
+    if (password === null) return;
+
+    uploadButton.disabled = true;
+    uploadInProgress = true;
+    progressClose.disabled = true;
+    progressTitle.textContent = "正在上传";
+    progressDescription.textContent = "正在上传到当前目录…";
+    progressFile.textContent = "准备文件…";
+    progressSummary.textContent = `共 ${files.length} 个文件`;
+    progressDialog.showModal();
+
+    let uploaded = 0;
+    let skipped = 0;
+    let failed = 0;
+    let denied = false;
+    let next = 0;
+    let processed = 0;
+    let settledBytes = 0;
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    const inFlightBytes = new Array(files.length).fill(0);
+
+    const updateProgress = (currentFile) => {
+      const inFlight = inFlightBytes.reduce((sum, bytes) => sum + bytes, 0);
+      const transferred = Math.min(totalBytes, settledBytes + inFlight);
+      const percent = totalBytes > 0
+        ? Math.floor((transferred / totalBytes) * 100)
+        : Math.floor((processed / files.length) * 100);
+      progressFile.textContent = currentFile || "正在收尾…";
+      progressFill.style.width = `${percent}%`;
+      progressBar.setAttribute("aria-valuenow", String(percent));
+      progressPercent.textContent = `${percent}%`;
+      progressBytes.textContent = `${formatBytes(transferred)} / ${formatBytes(totalBytes)}`;
+      progressSummary.textContent = `已处理 ${processed} / ${files.length} 个文件`;
+    };
+
+    const sendFile = (file, index) => new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      const relativePath = file.webkitRelativePath || file.name;
+      progressFile.textContent = relativePath;
+      xhr.open("PUT", location.pathname);
+      xhr.setRequestHeader("X-Upload-Password", encodeURIComponent(password));
+      xhr.setRequestHeader("X-Upload-Path", encodeURIComponent(relativePath));
+      xhr.upload.addEventListener("progress", (event) => {
+        inFlightBytes[index] = event.lengthComputable ? Math.min(event.loaded, file.size) : event.loaded;
+        updateProgress(relativePath);
+      });
+      xhr.addEventListener("load", () => {
+        let result = {};
+        try { result = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300 && result.result === "uploaded") {
+          inFlightBytes[index] = file.size;
+        }
+        settledBytes += inFlightBytes[index];
+        inFlightBytes[index] = 0;
+        processed++;
+        if (xhr.status === 403 && result.result === "denied") {
+          denied = true;
+          resolve("denied");
+        } else if (xhr.status === 409 && result.result === "skipped") {
+          skipped++;
+          resolve("skipped");
+        } else if (xhr.status >= 200 && xhr.status < 300 && result.result === "uploaded") {
+          uploaded++;
+          resolve("uploaded");
+        } else {
+          failed++;
+          resolve("failed");
+        }
+        updateProgress(relativePath);
+      });
+      xhr.addEventListener("error", () => {
+        settledBytes += inFlightBytes[index];
+        inFlightBytes[index] = 0;
+        processed++;
+        failed++;
+        updateProgress(relativePath);
+        resolve("failed");
+      });
+      xhr.addEventListener("abort", () => {
+        settledBytes += inFlightBytes[index];
+        inFlightBytes[index] = 0;
+        processed++;
+        failed++;
+        updateProgress(relativePath);
+        resolve("failed");
+      });
+      xhr.send(file);
+    });
+
+    const worker = async () => {
+      while (next < files.length && !denied) {
+        const index = next++;
+        await sendFile(files[index], index);
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(3, files.length) }, worker));
+    uploadInProgress = false;
+    progressClose.disabled = false;
+    uploadButton.disabled = false;
+
+    if (denied) {
+      status.textContent = "密码错误，本次上传未通过验证。";
+      progressTitle.textContent = "验证失败";
+      progressDescription.textContent = "密码错误，未继续上传剩余文件。";
+      progressSummary.textContent = `已上传 ${uploaded} 个，跳过 ${skipped} 个，失败 ${failed} 个`;
+      progressFile.textContent = "上传已停止";
+    } else {
+      status.textContent = `完成：上传 ${uploaded} 个，跳过同名 ${skipped} 个，失败 ${failed} 个。`;
+      progressTitle.textContent = failed ? "上传已结束" : "上传完成";
+      progressDescription.textContent = failed
+        ? "部分文件未能上传，页面即将刷新。"
+        : "所有文件已处理完成，页面即将刷新。";
+      progressFile.textContent = "已完成";
+      progressFill.style.width = "100%";
+      progressBar.setAttribute("aria-valuenow", "100");
+      progressPercent.textContent = "100%";
+      progressSummary.textContent = `上传 ${uploaded} 个 · 跳过同名 ${skipped} 个 · 失败 ${failed} 个`;
+      setTimeout(() => location.reload(), 1400);
+    }
+  }
+
+  fileInput.addEventListener("change", () => uploadSelection(fileInput));
+  folderInput.addEventListener("change", () => uploadSelection(folderInput));
+})();
+</script>
+"""
+
         body = f"""<!DOCTYPE HTML>
 <html lang="zh-CN">
 <head>
@@ -901,6 +1476,7 @@ class ListingHandler(SimpleHTTPRequestHandler):
     <p class="count" id="status">{html.escape(item_label)}</p>
   </div>
   <section class="stage" id="grid" aria-label="文件">
+    {upload_controls}
     {head}
     {list_inner}
     {search_empty}
@@ -942,6 +1518,7 @@ class ListingHandler(SimpleHTTPRequestHandler):
   }});
 }})();
 </script>
+{upload_script}
 </body>
 </html>
 """
@@ -955,6 +1532,8 @@ class ListingHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    global SHARE_ROOT, UPLOAD_ENABLED, UPLOAD_PASSWORD
+
     parser = argparse.ArgumentParser(description="Intranet file download server")
     parser.add_argument("--bind", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=8765, help="Listen port")
@@ -963,10 +1542,18 @@ def main() -> None:
         default=str(Path(__file__).resolve().parent / "down"),
         help="Directory to serve",
     )
+    parser.add_argument(
+        "--enable-upload",
+        action="store_true",
+        help="Enable password-protected file uploads",
+    )
     args = parser.parse_args()
 
     directory_path = Path(args.directory).resolve()
     directory_path.mkdir(parents=True, exist_ok=True)
+    SHARE_ROOT = directory_path
+    UPLOAD_ENABLED = args.enable_upload
+    UPLOAD_PASSWORD = os.environ.get("UPLOAD_PASSWORD", "0000")
     directory = str(directory_path)
     os.chdir(directory)
 
